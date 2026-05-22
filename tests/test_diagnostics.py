@@ -1,6 +1,7 @@
 import pathlib
 import sys
 import unittest
+import gzip
 from unittest import mock
 
 
@@ -15,9 +16,11 @@ from core.diagnostics import (
     format_doctor_report,
     parse_policy_target,
     run_doctor,
+    _classify_apps_script_probe,
     _check_apps_script,
     _check_exit_node,
     _check_google_front,
+    _read_http_response_sync,
 )
 
 
@@ -28,6 +31,20 @@ VALID_CONFIG = {
     "http_port": 18085,
     "socks5_port": 11080,
 }
+
+
+class FakeSocket:
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.timeout = None
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def recv(self, _size):
+        if not self.chunks:
+            return b""
+        return self.chunks.pop(0)
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -115,8 +132,63 @@ class DiagnosticsTests(unittest.TestCase):
         result = _check_apps_script(VALID_CONFIG, timeout=1)
 
         self.assertEqual(result.status, "fail")
-        self.assertIn("auth was rejected", result.message)
+        self.assertIn("auth rejected", result.message)
         tls_sock.sendall.assert_called_once()
+        self.assertIn(b"http://example.com/", tls_sock.sendall.call_args.args[0])
+
+    def test_apps_script_probe_classifies_valid_relay_success_json(self):
+        body = b'{"s":200,"h":{"Content-Type":"text/html"},"b":"SGVsbG8="}'
+
+        result = _classify_apps_script_probe(200, {"content-type": "text/html"}, body, 123)
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("Relay/auth envelope valid", result.message)
+        self.assertIn("HTTP 200", result.message)
+
+    def test_apps_script_probe_classifies_non_relay_html(self):
+        body = b"<!doctype html><html><body>Welcome</body></html>"
+
+        result = _classify_apps_script_probe(200, {"content-type": "text/html"}, body, 123)
+
+        self.assertEqual(result.status, "warn")
+        self.assertIn("non-relay HTML", result.message)
+
+    def test_apps_script_probe_classifies_malformed_json(self):
+        body = b"{not valid json"
+
+        result = _classify_apps_script_probe(200, {"content-type": "application/json"}, body, 123)
+
+        self.assertEqual(result.status, "warn")
+        self.assertIn("unexpected response shape", result.message)
+
+    @mock.patch("core.diagnostics.socket.create_connection", side_effect=TimeoutError("timed out"))
+    def test_apps_script_probe_reports_network_timeout(self, _create_connection):
+        result = _check_apps_script(VALID_CONFIG, timeout=1)
+
+        self.assertEqual(result.status, "warn")
+        self.assertIn("relay probe failed", result.message)
+        self.assertIn("timed out", result.detail)
+
+    def test_apps_script_probe_reader_decodes_chunked_gzip_body(self):
+        relay_json = b'{"s":200,"h":{},"b":""}'
+        compressed = gzip.compress(relay_json)
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"Content-Encoding: gzip\r\n"
+            b"Content-Type: text/html; charset=utf-8\r\n"
+            b"\r\n"
+            + f"{len(compressed):x}\r\n".encode("ascii")
+            + compressed
+            + b"\r\n0\r\n\r\n"
+        )
+        sock = FakeSocket([response])
+
+        status, headers, body = _read_http_response_sync(sock, timeout=1, limit=4096)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-encoding"], "gzip")
+        self.assertEqual(body, relay_json)
 
     def test_parse_policy_target_supports_host_port_url_and_ipv6(self):
         self.assertEqual(parse_policy_target("github.com"), ("github.com", 443, "https"))

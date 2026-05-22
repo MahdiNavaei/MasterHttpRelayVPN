@@ -6,11 +6,15 @@ import socket
 import ssl
 import time
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Iterable
 from urllib.parse import urlsplit
+
+from core import codec
+from relay.relay_response import classify_relay_envelope, load_relay_json
 
 from .config_validation import ValidationIssue, validate_config
 from .domain_matcher import normalize_host
@@ -413,6 +417,7 @@ def _check_apps_script(config: dict, *, timeout: float) -> DiagnosticResult:
     google_ip = str(config.get("google_ip", "216.239.38.120"))
     front_domain = str(config.get("front_domain", "www.google.com"))
     lang = str(config.get("apps_script_lang", "en") or "en")
+    probe_timeout = max(float(timeout), 6.0)
     path = f"/macros/s/{sid}/exec?hl={lang}"
     payload = json.dumps({
         "m": "GET",
@@ -424,6 +429,8 @@ def _check_apps_script(config: dict, *, timeout: float) -> DiagnosticResult:
         "Host: script.google.com\r\n"
         "Content-Type: application/json\r\n"
         "Accept: application/json,text/plain,*/*\r\n"
+        "Accept-Language: en-US,en;q=0.9\r\n"
+        "Accept-Encoding: gzip\r\n"
         f"Content-Length: {len(payload)}\r\n"
         "Connection: close\r\n"
         "\r\n"
@@ -433,49 +440,21 @@ def _check_apps_script(config: dict, *, timeout: float) -> DiagnosticResult:
     tls_sock = None
     start = time.perf_counter()
     try:
-        sock = socket.create_connection((google_ip, 443), timeout=timeout)
+        sock = socket.create_connection((google_ip, 443), timeout=probe_timeout)
         context = ssl.create_default_context()
         if not bool(config.get("verify_ssl", True)):
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
         tls_sock = context.wrap_socket(sock, server_hostname=front_domain)
-        tls_sock.settimeout(timeout)
+        tls_sock.settimeout(probe_timeout)
         tls_sock.sendall(request)
-        response = _recv_limited(tls_sock, limit=64 * 1024)
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        lower = response.lower()
-        if b"unauthorized" in lower:
-            return DiagnosticResult(
-                "APPS SCRIPT",
-                "fail",
-                f"Relay reached but auth was rejected in {elapsed_ms}ms.",
-                "Make sure config auth_key matches AUTH_KEY in Code.gs.",
-            )
-        if response.startswith(b"HTTP/") and b'"s"' in response:
-            return DiagnosticResult(
-                "APPS SCRIPT",
-                "pass",
-                f"Relay endpoint responded in {elapsed_ms}ms.",
-            )
-        if response.startswith(b"HTTP/") and b'"e"' in response:
-            return DiagnosticResult(
-                "APPS SCRIPT",
-                "warn",
-                f"Relay endpoint returned an error envelope in {elapsed_ms}ms.",
-                "Check Apps Script deployment, quotas, and target reachability.",
-            )
-        if response.startswith(b"HTTP/"):
-            return DiagnosticResult(
-                "APPS SCRIPT",
-                "warn",
-                f"Apps Script endpoint returned an unexpected response in {elapsed_ms}ms.",
-                "Check deployment access is set to Anyone and script_id is current.",
-            )
-        return DiagnosticResult(
-            "APPS SCRIPT",
-            "warn",
-            "Apps Script probe returned a non-HTTP response.",
+        status, headers, body = _read_http_response_sync(
+            tls_sock,
+            timeout=probe_timeout,
+            limit=256 * 1024,
         )
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return _classify_apps_script_probe(status, headers, body, elapsed_ms)
     except Exception as exc:
         return DiagnosticResult(
             "APPS SCRIPT",
@@ -492,15 +471,203 @@ def _check_apps_script(config: dict, *, timeout: float) -> DiagnosticResult:
                 pass
 
 
-def _recv_limited(sock, *, limit: int) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    while total < limit:
-        data = sock.recv(min(8192, limit - total))
-        if not data:
+def _classify_apps_script_probe(
+    status: int,
+    headers: dict[str, str],
+    body: bytes,
+    elapsed_ms: int,
+) -> DiagnosticResult:
+    """Classify the decoded Apps Script relay probe response."""
+    if not status:
+        return DiagnosticResult(
+            "APPS SCRIPT",
+            "warn",
+            "Apps Script probe returned a non-HTTP response.",
+        )
+
+    data = load_relay_json(body.decode(errors="replace").strip())
+    if isinstance(data, dict):
+        error_text = str(data.get("e") or "")
+        if error_text:
+            category, raw = classify_relay_envelope(body)
+            lower = error_text.lower()
+            if category == "auth" or "unauthorized" in lower:
+                return DiagnosticResult(
+                    "APPS SCRIPT",
+                    "fail",
+                    f"Apps Script auth rejected in {elapsed_ms}ms.",
+                    "Check auth_key in config.json and AUTH_KEY in Code.gs.",
+                )
+            if category == "deploy":
+                return DiagnosticResult(
+                    "APPS SCRIPT",
+                    "warn",
+                    f"Apps Script deployment error in {elapsed_ms}ms.",
+                    "Check that script_id is a current Web App Deployment ID.",
+                )
+            if category == "quota":
+                return DiagnosticResult(
+                    "APPS SCRIPT",
+                    "warn",
+                    f"Apps Script quota error in {elapsed_ms}ms.",
+                    "Wait for quota reset or add another deployment ID.",
+                )
+            return DiagnosticResult(
+                "APPS SCRIPT",
+                "warn",
+                f"Relay endpoint returned an error envelope in {elapsed_ms}ms.",
+                f"{raw or error_text}; check deployment, quotas, and target reachability.",
+            )
+
+        relay_status = data.get("s")
+        if isinstance(relay_status, int) and 100 <= relay_status <= 599:
+            return DiagnosticResult(
+                "APPS SCRIPT",
+                "pass",
+                f"Relay/auth envelope valid in {elapsed_ms}ms; target returned HTTP {relay_status}.",
+            )
+        return DiagnosticResult(
+            "APPS SCRIPT",
+            "warn",
+            f"Apps Script returned JSON but not a relay envelope in {elapsed_ms}ms.",
+            "Check that the deployed Code.gs matches this repository version.",
+        )
+
+    content_type = headers.get("content-type", "")
+    body_start = body[:512].lstrip().lower()
+    if body_start.startswith((b"<!doctype", b"<html")) or "html" in content_type.lower():
+        return DiagnosticResult(
+            "APPS SCRIPT",
+            "warn",
+            f"Apps Script endpoint returned non-relay HTML in {elapsed_ms}ms.",
+            "Check deployment ID and Web App access settings.",
+        )
+
+    if status in {301, 302, 303, 307, 308}:
+        return DiagnosticResult(
+            "APPS SCRIPT",
+            "warn",
+            f"Apps Script endpoint redirected with HTTP {status} in {elapsed_ms}ms.",
+            "Check deployment ID and Web App access settings.",
+        )
+
+    return DiagnosticResult(
+        "APPS SCRIPT",
+        "warn",
+        f"Apps Script endpoint returned an unexpected response shape in {elapsed_ms}ms.",
+        "Check that the deployed Code.gs relay response contract is current.",
+    )
+
+
+def _read_http_response_sync(
+    sock,
+    *,
+    timeout: float,
+    limit: int,
+) -> tuple[int, dict[str, str], bytes]:
+    """Read one blocking HTTP/1.1 response, including chunked/gzip bodies."""
+    sock.settimeout(timeout)
+    raw = _recv_until(sock, marker=b"\r\n\r\n", limit=64 * 1024)
+    if b"\r\n\r\n" not in raw:
+        return 0, {}, b""
+
+    header_section, body = raw.split(b"\r\n\r\n", 1)
+    lines = header_section.split(b"\r\n")
+    status_line = lines[0].decode(errors="replace") if lines else ""
+    match = re.search(r"\d{3}", status_line)
+    status = int(match.group()) if match else 0
+
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if b":" in line:
+            key, value = line.decode(errors="replace").split(":", 1)
+            headers[key.strip().lower()] = value.strip()
+
+    transfer_encoding = headers.get("transfer-encoding", "").lower()
+    content_length = headers.get("content-length")
+    if "chunked" in transfer_encoding:
+        body = _read_chunked_sync(sock, body, limit=limit)
+    elif content_length:
+        try:
+            expected = int(content_length)
+        except ValueError:
+            expected = 0
+        if expected > limit:
+            raise RuntimeError("Apps Script probe response exceeded size limit")
+        body = _recv_exact_body(sock, body, expected, limit=limit)
+    else:
+        body = _recv_to_close(sock, body, limit=limit)
+
+    content_encoding = headers.get("content-encoding", "")
+    if content_encoding:
+        body = codec.decode(body, content_encoding)
+    if len(body) > limit:
+        raise RuntimeError("Apps Script probe response exceeded size limit")
+    return status, headers, body
+
+
+def _recv_until(sock, *, marker: bytes, limit: int) -> bytes:
+    data = b""
+    while marker not in data and len(data) < limit:
+        chunk = sock.recv(min(8192, limit - len(data)))
+        if not chunk:
             break
-        chunks.append(data)
-        total += len(data)
-        if b"\r\n\r\n" in b"".join(chunks) and total > 2048:
+        data += chunk
+    return data
+
+
+def _recv_exact_body(sock, body: bytes, expected: int, *, limit: int) -> bytes:
+    while len(body) < expected:
+        if len(body) > limit:
+            raise RuntimeError("Apps Script probe response exceeded size limit")
+        chunk = sock.recv(min(8192, expected - len(body)))
+        if not chunk:
             break
-    return b"".join(chunks)
+        body += chunk
+    return body[:expected]
+
+
+def _recv_to_close(sock, body: bytes, *, limit: int) -> bytes:
+    while len(body) < limit:
+        try:
+            chunk = sock.recv(min(8192, limit - len(body)))
+        except TimeoutError:
+            break
+        if not chunk:
+            break
+        body += chunk
+    return body
+
+
+def _read_chunked_sync(sock, buf: bytes, *, limit: int) -> bytes:
+    result = b""
+    while True:
+        while b"\r\n" not in buf:
+            chunk = sock.recv(8192)
+            if not chunk:
+                return result
+            buf += chunk
+
+        end = buf.find(b"\r\n")
+        size_text = buf[:end].decode(errors="replace").strip()
+        buf = buf[end + 2:]
+        if not size_text:
+            continue
+
+        try:
+            size = int(size_text.split(";", 1)[0], 16)
+        except ValueError:
+            return result
+        if size == 0:
+            return result
+        if size > limit or len(result) + size > limit:
+            raise RuntimeError("Apps Script probe response exceeded size limit")
+
+        while len(buf) < size + 2:
+            chunk = sock.recv(8192)
+            if not chunk:
+                break
+            buf += chunk
+
+        result += buf[:size]
+        buf = buf[size + 2:]

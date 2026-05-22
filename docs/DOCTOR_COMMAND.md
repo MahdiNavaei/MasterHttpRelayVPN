@@ -33,7 +33,7 @@ The command focuses on the checks most useful when the proxy does not work:
 - SOCKS5 proxy port can bind
 - HTTP and SOCKS5 ports do not conflict
 - configured Google front is reachable
-- Apps Script relay endpoint responds and rejects/accepts auth clearly
+- Apps Script relay endpoint accepts a relay-format probe and rejects/accepts auth clearly
 - exit node health if `exit_node.enabled` is true
 - MITM CA state, shown as a safety note
 - observe-only policy recommendations for hosts passed with `--check-host`
@@ -51,7 +51,15 @@ The command focuses on the checks most useful when the proxy does not work:
 - change runtime traffic behavior
 - test whether a `--check-host` target website is actually reachable
 
-The Apps Script probe sends one small test relay request when live network checks are enabled. This is used only to confirm reachability/auth and may consume one Apps Script execution.
+The Apps Script probe sends one small relay-format `GET` request for `http://example.com/` when live network checks are enabled. This is used only to confirm the deployment can parse the relay envelope, authenticate the request, fetch a lightweight target, and return a valid relay response. It may consume one Apps Script execution and uses a bounded timeout so cold or slow deployments do not hang the command.
+
+Apps Script result meanings:
+
+- `PASS`: the endpoint returned a valid relay/auth envelope.
+- `FAIL`: auth was rejected, usually because `auth_key` in `config.json` does not match `AUTH_KEY` in `Code.gs`.
+- `WARN`: the endpoint returned non-relay HTML, malformed JSON, a deployment/quota error, or the network probe timed out.
+
+If the probe reports non-relay HTML, check that `script_id` is the Web App Deployment ID and that the deployment access is set to `Anyone`.
 
 `--check-host` does not make a remote request to the target host. It only runs the local observe-only policy router and prints what action would be recommended.
 
