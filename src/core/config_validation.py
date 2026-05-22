@@ -27,6 +27,7 @@ PLACEHOLDER_PSKS = {
 }
 
 LOCALHOSTS = {"127.0.0.1", "localhost", "::1"}
+ROUTING_ACTIONS = {"direct", "relay", "block", "unknown", "sensitive"}
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ def validate_config(
     _validate_ports(config, issues)
     _validate_listen_security(config, issues)
     _validate_exit_node(config, issues)
+    _validate_routing(config, issues)
     _validate_ca_files(ca_cert_file, ca_key_file, issues)
 
     issues.append(ValidationIssue(
@@ -208,6 +210,72 @@ def _validate_exit_node(config: dict[str, Any],
             f"Exit node PSK is missing or placeholder ({redact_value(psk)}).",
             "exit_node.psk",
         ))
+
+
+def _validate_routing(config: dict[str, Any],
+                      issues: list[ValidationIssue]) -> None:
+    routing = config.get("routing")
+    if routing is None:
+        return
+    if not isinstance(routing, dict):
+        issues.append(ValidationIssue(
+            "warn",
+            "routing_section_invalid",
+            "routing must be an object when present.",
+            "routing",
+        ))
+        return
+
+    default_action = str(routing.get("default_action", "relay")).lower()
+    if default_action not in ROUTING_ACTIONS:
+        issues.append(ValidationIssue(
+            "warn",
+            "routing_default_action_invalid",
+            "routing.default_action is not a known action.",
+            "routing.default_action",
+        ))
+
+    observe_only = routing.get("observe_only", True)
+    if not isinstance(observe_only, bool):
+        issues.append(ValidationIssue(
+            "warn",
+            "routing_observe_only_invalid",
+            "routing.observe_only must be true or false.",
+            "routing.observe_only",
+        ))
+    elif observe_only is False:
+        issues.append(ValidationIssue(
+            "warn",
+            "routing_enforcement_not_implemented",
+            "routing.observe_only=false is configured, but runtime enforcement is not implemented.",
+            "routing.observe_only",
+        ))
+
+    for field in ("direct_domains", "relay_domains", "sensitive_domains"):
+        if field in routing and not isinstance(routing.get(field), list):
+            issues.append(ValidationIssue(
+                "warn",
+                f"routing_{field}_invalid",
+                f"routing.{field} must be a list.",
+                f"routing.{field}",
+            ))
+
+    domestic = routing.get("domestic_direct")
+    if domestic is not None:
+        if not isinstance(domestic, dict):
+            issues.append(ValidationIssue(
+                "warn",
+                "routing_domestic_direct_invalid",
+                "routing.domestic_direct must be an object.",
+                "routing.domestic_direct",
+            ))
+        elif "suffixes" in domestic and not isinstance(domestic.get("suffixes"), list):
+            issues.append(ValidationIssue(
+                "warn",
+                "routing_domestic_direct_suffixes_invalid",
+                "routing.domestic_direct.suffixes must be a list.",
+                "routing.domestic_direct.suffixes",
+            ))
 
 
 def _validate_ca_files(

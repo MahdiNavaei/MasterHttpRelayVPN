@@ -81,5 +81,24 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertIn("mitm_ca_cert_exists", found)
         self.assertIn("mitm_ca_private_key_exists", found)
 
+    def test_warns_for_invalid_routing_section(self):
+        report = validate_config({
+            "auth_key": "strong-secret-value",
+            "script_id": "AKfycb1234567890",
+            "routing": {
+                "default_action": "teleport",
+                "direct_domains": "example.com",
+                "observe_only": False,
+                "domestic_direct": {"enabled": True, "suffixes": ".ir"},
+            },
+        })
+
+        found = codes(report)
+        self.assertIn("routing_default_action_invalid", found)
+        self.assertIn("routing_direct_domains_invalid", found)
+        self.assertIn("routing_enforcement_not_implemented", found)
+        self.assertIn("routing_domestic_direct_suffixes_invalid", found)
+
+
 if __name__ == "__main__":
     unittest.main()

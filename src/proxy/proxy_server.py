@@ -19,6 +19,8 @@ try:
 except Exception:  # optional dependency fallback
     certifi = None
 
+from core.policy import PolicyRouter
+from core.redaction import redact_text
 from core.constants import (
     CACHE_MAX_MB,
     CLIENT_IDLE_TIMEOUT,
@@ -87,6 +89,7 @@ class ProxyServer:
                 f"(both set to {self.port} on {self.host}). "
                 f"Change one of them in config.json."
             )
+        self._policy_router = PolicyRouter(config)
         self.fronter = DomainFronter(config)
         self.mitm = None
         self._cache = ResponseCache(max_mb=CACHE_MAX_MB)
@@ -564,6 +567,7 @@ class ProxyServer:
                                     reader: asyncio.StreamReader,
                                     writer: asyncio.StreamWriter):
         """Route a target connection through the Apps Script relay."""
+        self._observe_route_decision(host, port, "connect")
         # ── Block / bypass policy ─────────────────────────────────
         if self._is_blocked(host):
             log.warning("BLOCKED → %s:%d (matches block_hosts)", host, port)
@@ -637,6 +641,30 @@ class ProxyServer:
             ok = await self._do_direct_tunnel(host, port, reader, writer)
             if not ok:
                 log.warning("Direct tunnel failed for %s:%d", host, port)
+
+    def _observe_route_decision(self, host: str, port: int, protocol: str) -> None:
+        """Log advisory policy decisions without changing routing behavior."""
+        try:
+            decision = self._policy_router.decide(
+                host=host,
+                port=port,
+                protocol=protocol,
+            )
+            matched = decision.matched_rule or "-"
+            log.info(
+                "ROUTE OBSERVE host=%s port=%s action=%s transport=%s "
+                "reason=%s matched_rule=%s mitm_allowed=%s enforce=%s",
+                redact_text(host),
+                port,
+                decision.action,
+                decision.transport,
+                decision.reason,
+                redact_text(matched),
+                str(decision.mitm_allowed).lower(),
+                str(decision.enforce).lower(),
+            )
+        except Exception as exc:
+            log.debug("ROUTE OBSERVE failed for %s:%s: %s", host, port, exc)
 
     # ── Hosts override (fake DNS) ─────────────────────────────────
 
