@@ -25,6 +25,23 @@ Browser -> Local proxy -> Google front -> Your Apps Script relay -> Target site
                          network filter sees a Google-facing connection
 ```
 
+## Diagnostics and Policy Dry Run
+
+This fork adds read-only troubleshooting commands:
+
+- `python main.py doctor` checks local proxy readiness, Google front reachability, Apps Script relay/auth health, exit node health, and safety notes without starting the proxy.
+- `python main.py status` is an alias for the same diagnostics.
+- `python main.py doctor --check-host <host>` shows observe-only policy recommendations for a host without connecting to that target.
+- Runtime policy logging is currently observe-only; it does not change routing behavior.
+
+See:
+
+- [Doctor Command](docs/DOCTOR_COMMAND.md)
+- [Policy Routing](docs/POLICY_ROUTING.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+
+This fork is also moving toward resilient diagnostics, policy routing, and future full-system tunnel support. Details are in [Resilient Tunnel PRD](docs/PRD_RESILIENT_TUNNEL.md) and [Target Architecture](docs/ARCHITECTURE_TARGET.md).
+
 ## Quick Menu 🧭
 
 Click the links below for guides on common topics.
