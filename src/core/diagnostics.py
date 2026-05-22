@@ -10,8 +10,11 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Iterable
+from urllib.parse import urlsplit
 
 from .config_validation import ValidationIssue, validate_config
+from .domain_matcher import normalize_host
+from .policy import PolicyRouter, RouteDecision
 from .redaction import redact_text, redact_url
 
 
@@ -38,6 +41,17 @@ class DoctorReport:
     @property
     def has_failures(self) -> bool:
         return any(result.status == "fail" for result in self.results)
+
+
+@dataclass(frozen=True)
+class HostPolicyCheck:
+    """Parsed host target and observe-only policy decision."""
+
+    raw: str
+    host: str
+    port: int
+    protocol: str
+    decision: RouteDecision
 
 
 def run_doctor(
@@ -93,7 +107,22 @@ def run_doctor(
     return DoctorReport(tuple(results))
 
 
-def format_doctor_report(report: DoctorReport) -> str:
+def build_policy_checks(config: dict, targets: Iterable[str]) -> tuple[HostPolicyCheck, ...]:
+    """Build observe-only policy decisions for user-supplied host targets."""
+    router = PolicyRouter(config)
+    checks: list[HostPolicyCheck] = []
+    for target in targets or []:
+        host, port, protocol = parse_policy_target(target)
+        decision = router.decide(host=host, port=port, protocol=protocol, url=target)
+        checks.append(HostPolicyCheck(str(target), host, port, protocol, decision))
+    return tuple(checks)
+
+
+def format_doctor_report(
+    report: DoctorReport,
+    *,
+    policy_checks: Iterable[HostPolicyCheck] = (),
+) -> str:
     """Render a terminal-friendly report."""
     lines = ["MasterHttpRelayVPN doctor", "", "Connectivity & Setup"]
     primary = [result for result in report.results if result.category != "safety"]
@@ -107,7 +136,78 @@ def format_doctor_report(report: DoctorReport) -> str:
         safety_width = max(len(result.name) for result in safety)
         for result in safety:
             lines.append(_format_result(result, safety_width))
+    policy_checks = tuple(policy_checks)
+    if policy_checks:
+        lines.extend(["", "Policy Dry Run"])
+        target_width = max(len(_policy_target_label(check)) for check in policy_checks)
+        action_width = max(len(check.decision.action) for check in policy_checks)
+        transport_width = max(len(check.decision.transport) for check in policy_checks)
+        reason_width = max(len(check.decision.reason) for check in policy_checks)
+        for check in policy_checks:
+            decision = check.decision
+            matched = f"matched={decision.matched_rule}" if decision.matched_rule else "matched=-"
+            lines.append(
+                f"{_policy_target_label(check):<{target_width}}  "
+                f"{decision.action:<{action_width}}  "
+                f"{decision.transport:<{transport_width}}  "
+                f"{decision.reason:<{reason_width}}  "
+                f"{matched}  "
+                f"mitm_allowed={str(decision.mitm_allowed).lower()}  "
+                f"enforce={str(decision.enforce).lower()}"
+            )
     return "\n".join(lines)
+
+
+def parse_policy_target(value: object) -> tuple[str, int, str]:
+    """Parse a host/URL target into `(host, port, protocol)` for policy dry-run."""
+    text = str(value or "").strip()
+    if not text:
+        return "", 443, "https"
+
+    scheme = ""
+    port: int | None = None
+    if "://" in text:
+        try:
+            parsed = urlsplit(text)
+            scheme = (parsed.scheme or "").lower()
+            host = normalize_host(parsed.hostname or "")
+            port = parsed.port
+        except ValueError:
+            host = normalize_host(text)
+    elif text.startswith("["):
+        end = text.find("]")
+        host = normalize_host(text[:end + 1] if end != -1 else text)
+        if end != -1 and text[end + 1:].startswith(":"):
+            maybe_port = text[end + 2:]
+            if maybe_port.isdigit():
+                port = int(maybe_port)
+    else:
+        host = normalize_host(text)
+        if text.count(":") == 1:
+            raw_host, _, raw_port = text.rpartition(":")
+            if raw_port.isdigit():
+                host = normalize_host(raw_host)
+                port = int(raw_port)
+
+    if port is None:
+        port = 80 if scheme == "http" else 443
+
+    if scheme in {"http", "https"}:
+        protocol = scheme
+    elif port == 80:
+        protocol = "http"
+    elif port == 443:
+        protocol = "https"
+    else:
+        protocol = "connect"
+    return host, port, protocol
+
+
+def _policy_target_label(check: HostPolicyCheck) -> str:
+    host = check.host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{host}:{check.port}"
 
 
 def _format_result(result: DiagnosticResult, width: int) -> str:

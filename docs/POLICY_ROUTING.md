@@ -94,6 +94,27 @@ ROUTE OBSERVE host=login.payment.example port=443 action=sensitive transport=dir
 
 These logs are advisory only. They do not change the actual path selected by the current proxy code.
 
+## Doctor Policy Dry Run
+
+You can inspect policy recommendations without starting the proxy:
+
+```bash
+python main.py doctor --check-host github.com
+python main.py doctor --check-host github.com --check-host example.ir
+python main.py status --check-host https://github.com
+```
+
+The `Policy Dry Run` section uses the same observe-only `PolicyRouter` as the proxy log. It does not connect to the target website and does not change runtime behavior.
+
+Example:
+
+```text
+Policy Dry Run
+github.com:443      relay   apps_script  default_relay            matched=-    mitm_allowed=true   enforce=false
+api.github.com:443  relay   apps_script  routing.relay_domains    matched=.github.com  mitm_allowed=true  enforce=false
+example.ir:443      direct  direct       routing.domestic_direct  matched=.ir  mitm_allowed=false  enforce=false
+```
+
 ## Decision Fields
 
 Policy decisions include:

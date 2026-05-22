@@ -11,7 +11,9 @@ if str(SRC) not in sys.path:
 
 from core.diagnostics import (
     DiagnosticResult,
+    build_policy_checks,
     format_doctor_report,
+    parse_policy_target,
     run_doctor,
     _check_apps_script,
     _check_exit_node,
@@ -115,6 +117,39 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(result.status, "fail")
         self.assertIn("auth was rejected", result.message)
         tls_sock.sendall.assert_called_once()
+
+    def test_parse_policy_target_supports_host_port_url_and_ipv6(self):
+        self.assertEqual(parse_policy_target("github.com"), ("github.com", 443, "https"))
+        self.assertEqual(parse_policy_target("github.com:8443"), ("github.com", 8443, "connect"))
+        self.assertEqual(parse_policy_target("https://github.com/path"), ("github.com", 443, "https"))
+        self.assertEqual(parse_policy_target("http://github.com/path"), ("github.com", 80, "http"))
+        self.assertEqual(parse_policy_target("[::1]:443"), ("::1", 443, "https"))
+
+    def test_policy_dry_run_format_supports_multiple_hosts(self):
+        config = {
+            "block_hosts": ["blocked.example"],
+            "routing": {
+                "default_action": "relay",
+                "sensitive_domains": [".payment.example"],
+            },
+        }
+        checks = build_policy_checks(
+            config,
+            ["blocked.example", "https://login.payment.example/path", "192.168.1.1"],
+        )
+        output = format_doctor_report(
+            type("Report", (), {"results": ()})(),
+            policy_checks=checks,
+        )
+
+        self.assertIn("Policy Dry Run", output)
+        self.assertIn("blocked.example:443", output)
+        self.assertIn("login.payment.example:443", output)
+        self.assertIn("192.168.1.1:443", output)
+        self.assertEqual([check.decision.enforce for check in checks], [False, False, False])
+        self.assertEqual(checks[0].decision.action, "block")
+        self.assertEqual(checks[1].decision.action, "sensitive")
+        self.assertEqual(checks[2].decision.reason, "private_or_local_ip")
 
 
 if __name__ == "__main__":

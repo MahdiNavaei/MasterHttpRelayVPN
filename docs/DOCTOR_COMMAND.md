@@ -14,6 +14,15 @@ python main.py doctor
 python main.py status
 ```
 
+Policy dry-run examples:
+
+```bash
+python main.py doctor --check-host github.com
+python main.py doctor --check-host github.com --check-host example.ir
+python main.py status --check-host https://github.com
+python main.py doctor --check-host github.com:443 --check-host "[::1]:443"
+```
+
 ## What It Checks
 
 The command focuses on the checks most useful when the proxy does not work:
@@ -27,6 +36,7 @@ The command focuses on the checks most useful when the proxy does not work:
 - Apps Script relay endpoint responds and rejects/accepts auth clearly
 - exit node health if `exit_node.enabled` is true
 - MITM CA state, shown as a safety note
+- observe-only policy recommendations for hosts passed with `--check-host`
 
 ## What It Does Not Change
 
@@ -39,8 +49,11 @@ The command focuses on the checks most useful when the proxy does not work:
 - modify routes or system proxy settings
 - enable TUN/tun2socks
 - change runtime traffic behavior
+- test whether a `--check-host` target website is actually reachable
 
 The Apps Script probe sends one small test relay request when live network checks are enabled. This is used only to confirm reachability/auth and may consume one Apps Script execution.
+
+`--check-host` does not make a remote request to the target host. It only runs the local observe-only policy router and prints what action would be recommended.
 
 ## Example Output
 
@@ -57,6 +70,10 @@ APPS SCRIPT   PASS   Relay endpoint responded in 930ms.
 Safety Notes
 NOTE          WARN   Current HTTPS relay behavior relies on local MITM unless a host is routed directly.
 MITM CA       WARN   CA certificate exists but is not trusted.
+
+Policy Dry Run
+github.com:443  relay   apps_script  default_relay  matched=-   mitm_allowed=true   enforce=false
+example.ir:443  direct  direct       routing.domestic_direct  matched=.ir  mitm_allowed=false  enforce=false
 ```
 
 ## Privacy And Security

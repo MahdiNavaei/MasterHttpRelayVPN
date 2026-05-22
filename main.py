@@ -22,7 +22,7 @@ if _SRC_DIR not in sys.path:
 
 from core.cert_installer import install_ca, uninstall_ca, is_ca_trusted
 from core.constants import __version__
-from core.diagnostics import format_doctor_report, run_doctor
+from core.diagnostics import build_policy_checks, format_doctor_report, run_doctor
 from core.lan_utils import log_lan_access
 from core.google_ip_scanner import scan_sync
 from core.logging_utils import configure as configure_logging, print_banner
@@ -105,6 +105,13 @@ def parse_args():
         "--scan",
         action="store_true",
         help="Scan Google IPs to find the fastest reachable one and exit.",
+    )
+    parser.add_argument(
+        "--check-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="With doctor/status, show observe-only policy recommendation for a host or URL.",
     )
     return parser.parse_args()
 
@@ -196,7 +203,8 @@ def main():
             ca_key_file=CA_KEY_FILE,
             is_ca_trusted_func=is_ca_trusted,
         )
-        print(format_doctor_report(report))
+        policy_checks = build_policy_checks(config, args.check_host)
+        print(format_doctor_report(report, policy_checks=policy_checks))
         sys.exit(1 if report.has_failures else 0)
 
     # Handle cert-only commands before loading config so they can run standalone.
