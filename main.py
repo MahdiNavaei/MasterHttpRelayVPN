@@ -22,10 +22,11 @@ if _SRC_DIR not in sys.path:
 
 from core.cert_installer import install_ca, uninstall_ca, is_ca_trusted
 from core.constants import __version__
+from core.diagnostics import format_doctor_report, run_doctor
 from core.lan_utils import log_lan_access
 from core.google_ip_scanner import scan_sync
 from core.logging_utils import configure as configure_logging, print_banner
-from proxy.mitm import CA_CERT_FILE
+from proxy.mitm import CA_CERT_FILE, CA_KEY_FILE
 from proxy.proxy_server import ProxyServer
 
 
@@ -40,6 +41,12 @@ def parse_args():
     parser = argparse.ArgumentParser(
         prog="domainfront-tunnel",
         description="Local HTTP proxy that relays traffic through Google Apps Script.",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["doctor", "status"],
+        help="Optional command. Use 'doctor' to run read-only diagnostics.",
     )
     parser.add_argument(
         "-c", "--config",
@@ -102,37 +109,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-
-    # Handle cert-only commands before loading config so they can run standalone.
-    if args.install_cert or args.uninstall_cert:
-        configure_logging("INFO")
-        _log = logging.getLogger("Main")
-
-        if args.install_cert:
-            _log.info("Installing CA certificate…")
-            if not os.path.exists(CA_CERT_FILE):
-                from proxy.mitm import MITMCertManager
-                MITMCertManager()  # side-effect: creates ca/ca.crt + ca/ca.key
-            ok = install_ca(CA_CERT_FILE)
-            sys.exit(0 if ok else 1)
-
-        _log.info("Removing CA certificate…")
-        ok = uninstall_ca(CA_CERT_FILE)
-        if ok:
-            _log.info("CA certificate removed successfully.")
-        else:
-            _log.warning("CA certificate removal may have failed. Check logs above.")
-        sys.exit(0 if ok else 1)
-
-    config_path = args.config
-
+def _load_config(config_path: str, *, allow_wizard: bool) -> dict:
     try:
         with open(config_path) as f:
-            config = json.load(f)
+            return json.load(f)
     except FileNotFoundError:
         print(f"Config not found: {config_path}")
+        if not allow_wizard:
+            raise SystemExit(1)
         # Offer the interactive wizard if it's available and we're on a TTY.
         wizard = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup.py")
         if os.path.exists(wizard) and sys.stdin.isatty():
@@ -144,24 +128,26 @@ def main():
                 import subprocess
                 rc = subprocess.call([sys.executable, wizard])
                 if rc != 0:
-                    sys.exit(rc)
+                    raise SystemExit(rc)
                 try:
                     with open(config_path) as f:
-                        config = json.load(f)
+                        return json.load(f)
                 except Exception as e:
                     print(f"Could not load config after setup: {e}")
-                    sys.exit(1)
+                    raise SystemExit(1)
             else:
                 print("Copy config.example.json to config.json and fill in your values,")
                 print("or run: python setup.py")
-                sys.exit(1)
+                raise SystemExit(1)
         else:
             print("Run: python setup.py   (or copy config.example.json to config.json)")
-            sys.exit(1)
+            raise SystemExit(1)
     except json.JSONDecodeError as e:
         print(f"Invalid JSON in config: {e}")
-        sys.exit(1)
+        raise SystemExit(1)
 
+
+def _apply_overrides(config: dict, args) -> dict:
     # Environment variable overrides
     if os.environ.get("DFT_AUTH_KEY"):
         config["auth_key"] = os.environ["DFT_AUTH_KEY"]
@@ -190,6 +176,53 @@ def main():
     elif os.environ.get("DFT_SOCKS5_PORT"):
         config["socks5_port"] = int(os.environ["DFT_SOCKS5_PORT"])
 
+    if args.log_level is not None:
+        config["log_level"] = args.log_level
+    elif os.environ.get("DFT_LOG_LEVEL"):
+        config["log_level"] = os.environ["DFT_LOG_LEVEL"]
+
+    return config
+
+
+def main():
+    args = parse_args()
+
+    if args.command in ("doctor", "status"):
+        config = _load_config(args.config, allow_wizard=False)
+        config = _apply_overrides(config, args)
+        report = run_doctor(
+            config,
+            ca_cert_file=CA_CERT_FILE,
+            ca_key_file=CA_KEY_FILE,
+            is_ca_trusted_func=is_ca_trusted,
+        )
+        print(format_doctor_report(report))
+        sys.exit(1 if report.has_failures else 0)
+
+    # Handle cert-only commands before loading config so they can run standalone.
+    if args.install_cert or args.uninstall_cert:
+        configure_logging("INFO")
+        _log = logging.getLogger("Main")
+
+        if args.install_cert:
+            _log.info("Installing CA certificate…")
+            if not os.path.exists(CA_CERT_FILE):
+                from proxy.mitm import MITMCertManager
+                MITMCertManager()  # side-effect: creates ca/ca.crt + ca/ca.key
+            ok = install_ca(CA_CERT_FILE)
+            sys.exit(0 if ok else 1)
+
+        _log.info("Removing CA certificate…")
+        ok = uninstall_ca(CA_CERT_FILE)
+        if ok:
+            _log.info("CA certificate removed successfully.")
+        else:
+            _log.warning("CA certificate removal may have failed. Check logs above.")
+        sys.exit(0 if ok else 1)
+
+    config = _load_config(args.config, allow_wizard=True)
+    config = _apply_overrides(config, args)
+
     if args.disable_socks5:
         logging.getLogger("Main").warning(
             "--disable-socks5 is deprecated and ignored: SOCKS5 is always enabled."
@@ -197,11 +230,6 @@ def main():
 
     # Keep runtime behavior fixed regardless of user config values.
     config["socks5_enabled"] = True
-
-    if args.log_level is not None:
-        config["log_level"] = args.log_level
-    elif os.environ.get("DFT_LOG_LEVEL"):
-        config["log_level"] = os.environ["DFT_LOG_LEVEL"]
 
     for key in ("auth_key",):
         if key not in config:
