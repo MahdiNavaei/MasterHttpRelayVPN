@@ -107,6 +107,22 @@ See:
 
 ---
 
+## Managed Browser Mode
+
+Launch an isolated browser profile through the local proxy without changing system proxy settings:
+
+```bash
+python main.py browser --url https://example.com/
+```
+
+Browser mode starts the local proxy, waits for the HTTP/SOCKS listeners, launches Chrome, Edge, or Chromium with `--proxy-server=http://127.0.0.1:<http_port>`, and stops the proxy when the browser exits. It avoids using your normal browser profile by default and does not enforce observe-only policy decisions.
+
+See:
+
+- [Managed Browser Mode](docs/BROWSER_MODE.md)
+
+---
+
 ## Runtime Validation
 
 This fork was smoke-tested locally with a real browser profile through the proxy:

@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 
 # Project modules live under ./src — add it to sys.path so package imports
@@ -21,6 +23,11 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 from core.cert_installer import install_ca, uninstall_ca, is_ca_trusted
+from core.browser_launcher import (
+    browser_not_found_message,
+    prepare_browser_launch,
+)
+from core.config_validation import validate_config
 from core.constants import __version__
 from core.diagnostics import build_policy_checks, format_doctor_report, run_doctor
 from core.lan_utils import log_lan_access
@@ -45,8 +52,8 @@ def parse_args():
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["doctor", "status"],
-        help="Optional command. Use 'doctor' to run read-only diagnostics.",
+        choices=["doctor", "status", "browser"],
+        help="Optional command. Use 'doctor' for diagnostics or 'browser' for managed browser mode.",
     )
     parser.add_argument(
         "-c", "--config",
@@ -112,6 +119,32 @@ def parse_args():
         default=[],
         metavar="HOST",
         help="With doctor/status, show observe-only policy recommendation for a host or URL.",
+    )
+    parser.add_argument(
+        "--url",
+        default="https://example.com/",
+        help="With browser mode, URL to open (default: https://example.com/).",
+    )
+    parser.add_argument(
+        "--browser",
+        choices=["auto", "chrome", "edge", "chromium"],
+        default="auto",
+        help="With browser mode, browser executable family to launch.",
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="With browser mode, isolated browser profile directory.",
+    )
+    parser.add_argument(
+        "--temporary-profile",
+        action="store_true",
+        help="With browser mode, use a temporary isolated profile and remove it on exit.",
+    )
+    parser.add_argument(
+        "--insecure-ignore-cert-errors",
+        action="store_true",
+        help="With browser mode, pass --ignore-certificate-errors to the browser.",
     )
     return parser.parse_args()
 
@@ -206,6 +239,10 @@ def main():
         policy_checks = build_policy_checks(config, args.check_host)
         print(format_doctor_report(report, policy_checks=policy_checks))
         sys.exit(1 if report.has_failures else 0)
+
+    if args.command == "browser":
+        _run_browser_command(args)
+        return
 
     # Handle cert-only commands before loading config so they can run standalone.
     if args.install_cert or args.uninstall_cert:
@@ -345,6 +382,144 @@ def main():
         asyncio.run(_run(config))
     except KeyboardInterrupt:
         log.info("Stopped")
+
+
+def _run_browser_command(args) -> None:
+    """Run managed browser mode without changing system proxy settings."""
+    config = _load_config(args.config, allow_wizard=True)
+    config = _apply_overrides(config, args)
+    config["socks5_enabled"] = True
+    config["mode"] = "apps_script"
+    config["lan_sharing"] = False
+    config["listen_host"] = "127.0.0.1"
+    config["socks5_host"] = "127.0.0.1"
+
+    validation = validate_config(
+        config,
+        ca_cert_file=CA_CERT_FILE,
+        ca_key_file=CA_KEY_FILE,
+    )
+    errors = [issue for issue in validation.issues if issue.severity == "error"]
+    if errors:
+        print("Browser mode config validation failed:")
+        for issue in errors:
+            field = f" ({issue.field})" if issue.field else ""
+            print(f"- {issue.message}{field}")
+        raise SystemExit(1)
+
+    http_port = int(config.get("http_port", config.get("listen_port", 8080)))
+    launch = prepare_browser_launch(
+        requested_browser=args.browser,
+        proxy_host="127.0.0.1",
+        proxy_port=http_port,
+        url=args.url,
+        profile=args.profile,
+        temporary_profile=args.temporary_profile,
+        insecure_ignore_cert_errors=args.insecure_ignore_cert_errors,
+    )
+    if launch is None:
+        print(browser_not_found_message(args.browser, "127.0.0.1", http_port))
+        raise SystemExit(1)
+
+    configure_logging(config.get("log_level", "INFO"))
+    log = logging.getLogger("Browser")
+    print_banner(__version__)
+    log.info("Managed browser mode starting")
+    log.info("HTTP proxy for browser: http://127.0.0.1:%d", http_port)
+    log.info("Browser executable: %s", launch.executable.path)
+    log.info("Browser profile: %s", launch.profile_dir)
+    if launch.insecure_ignore_cert_errors:
+        log.warning(
+            "--insecure-ignore-cert-errors is enabled. "
+            "Use only for testing; it weakens browser TLS validation."
+        )
+    elif not os.path.exists(CA_CERT_FILE) or not is_ca_trusted(CA_CERT_FILE):
+        log.warning(
+            "HTTPS sites may show certificate errors until the local CA is trusted. "
+            "Run: python main.py --install-cert"
+        )
+
+    os.makedirs(launch.profile_dir, exist_ok=True)
+    try:
+        asyncio.run(_run_managed_browser(config, launch))
+    except KeyboardInterrupt:
+        log.info("Managed browser mode stopped")
+    finally:
+        if launch.temporary_profile:
+            shutil.rmtree(launch.profile_dir, ignore_errors=True)
+
+
+async def _run_managed_browser(config: dict, launch) -> int:
+    """Start proxy, launch browser, and stop proxy when browser exits."""
+    log = logging.getLogger("Browser")
+    server = ProxyServer(config)
+    server_task = asyncio.create_task(server.start())
+    process = None
+    try:
+        await _wait_for_proxy_listeners(config, server_task, timeout=45.0)
+        log.info("Launching browser: %s", launch.url)
+        process = subprocess.Popen(list(launch.command))
+        return_code = await asyncio.to_thread(process.wait)
+        log.info("Browser exited with code %s", return_code)
+        return return_code
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=5.0)
+            except asyncio.TimeoutError:
+                process.kill()
+                await asyncio.to_thread(process.wait)
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await server.stop()
+        stray = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in stray:
+            task.cancel()
+        if stray:
+            await asyncio.gather(*stray, return_exceptions=True)
+
+
+async def _wait_for_proxy_listeners(
+    config: dict,
+    server_task: asyncio.Task,
+    *,
+    timeout: float,
+) -> None:
+    """Wait until HTTP and SOCKS5 listeners accept local TCP connections."""
+    host = "127.0.0.1"
+    http_port = int(config.get("http_port", config.get("listen_port", 8080)))
+    socks_port = int(config.get("socks5_port", 1080))
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if server_task.done():
+            await server_task
+        if (
+            await _can_connect(host, http_port)
+            and await _can_connect(host, socks_port)
+        ):
+            return
+        await asyncio.sleep(0.2)
+    raise RuntimeError(
+        f"Proxy listeners did not become ready on {host}:{http_port} "
+        f"and {host}:{socks_port} within {timeout:.0f}s."
+    )
+
+
+async def _can_connect(host: str, port: int) -> bool:
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=0.5,
+        )
+    except Exception:
+        return False
+    try:
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        del reader
+    return True
 
 
 

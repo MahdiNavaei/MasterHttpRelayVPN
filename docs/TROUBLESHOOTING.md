@@ -118,6 +118,34 @@ Check:
 3. HTTPS traffic is also configured to use the same HTTP proxy.
 4. The CA is installed and the browser was fully restarted.
 
+## Managed Browser Mode Does Not Open
+
+Run:
+
+```bash
+python main.py browser --url https://example.com/
+```
+
+If the browser does not launch:
+
+1. Install Chrome, Edge, or Chromium.
+2. Try a specific browser, for example `python main.py browser --browser chrome`.
+3. Check that `config.json` has a valid `script_id` and `auth_key`.
+4. Run `python main.py doctor` and fix any `FAIL` results.
+5. Make sure the configured HTTP and SOCKS5 ports are not already in use.
+
+Managed browser mode uses an isolated profile and does not change system proxy settings. If HTTPS sites show certificate warnings, install the local CA:
+
+```bash
+python main.py --install-cert
+```
+
+For short tests only, you can use:
+
+```bash
+python main.py browser --insecure-ignore-cert-errors
+```
+
 ## SOCKS5 Works Differently Than HTTP Proxy
 
 Some SOCKS5 clients resolve domains locally and only send raw IPs to the proxy. That can break routes that depend on hostnames.
