@@ -1,172 +1,455 @@
-# MasterHttpRelayVPN
+# MasterHttpRelayVPN - Resilient Diagnostics Fork
 
-[![GitHub](https://img.shields.io/badge/GitHub-MasterHttpRelayVPN-blue?logo=github)](https://github.com/masterking32/MasterHttpRelayVPN) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/masterking32/MasterHttpRelayVPN) [![oosmetrics](https://api.oosmetrics.com/api/v1/badge/achievement/85a1f608-5c6d-4fcd-9b7f-b1ff8b680852.svg)](https://oosmetrics.com/repo/masterking32/MasterHttpRelayVPN) [![oosmetrics](https://api.oosmetrics.com/api/v1/badge/achievement/de9bee73-bc68-4f98-ba83-6957007046b1.svg)](https://oosmetrics.com/repo/masterking32/MasterHttpRelayVPN)
+> Experimental resilient HTTP/SOCKS5 relay proxy using Google Apps Script, with connectivity diagnostics, policy dry-run routing, observe-only route logging, and MITM TLS support.
 
->**Youtube safe search** and **live streaming** are now **Bypassed & Working** by default. so you don't need `youtube_via_relay` or Cloudflare / VPS `exit_node` for it.
+This repository is a fork of [masterking32/MasterHttpRelayVPN](https://github.com/masterking32/MasterHttpRelayVPN).
 
+The original project provides the core Google Apps Script relay, local HTTP/SOCKS5 proxy, MITM TLS flow, batching, HTTP/2 relay transport, Google fronting logic, and optional exit-node support.
 
-**Language:** English | [Persian / فارسی](README_FA.md)
+This fork focuses on improving usability, diagnostics, policy visibility, and future extensibility for restricted or unstable network environments.
 
-> نسخه فارسی با AI ایجاد شده. ترجیحا از نسخه انگلیسی استفاده کنید.
+---
 
-**Telegram Channel 📣:** [https://t.me/MasterDnsVPN](https://t.me/MasterDnsVPN) | @MasterDnsVPN
+## What This Fork Adds
 
-**Telegram Group 📣:** [https://t.me/MasterDnsVPNGroup](https://t.me/MasterDnsVPNGroup) | @MasterDnsVPNGroup
+This fork adds a diagnostics and routing-visibility layer on top of the original proxy:
 
+- `python main.py doctor` for read-only connectivity and setup diagnostics.
+- `python main.py status` as a diagnostics alias.
+- `python main.py doctor --check-host <host>` for policy dry-run checks.
+- Observe-only runtime route logging through a dedicated policy router.
+- Config validation and secret redaction for safer troubleshooting.
+- Public planning docs for a more resilient tunnel architecture.
+- A roadmap toward policy-based routing, multi-transport support, and future full-system tunnel mode.
 
-**❤️ Special Thanks to** [Abolix](https://github.com/abolix) for making this project possible and maintaining it.
+These features are intentionally conservative. They help users understand what is happening without changing the existing proxy traffic behavior.
 
-MasterHttpRelayVPN is a local proxy that routes browser traffic through a Google Apps Script relay using domain fronting. The simple path needs only this project and a free Google account. For sites that block Google egress, you can optionally add an exit node later.
+---
 
-We mainly use MITM (Man in the Middle) and Domain Fronting techniques.
+## What It Does
+
+MasterHttpRelayVPN runs a local HTTP/SOCKS5 proxy and relays browser or application traffic through a user-deployed Google Apps Script Web App.
+
+Typical flow:
 
 ```text
-Browser -> Local proxy -> Google front -> Your Apps Script relay -> Target site
-                         network filter sees a Google-facing connection
+Browser / App
+  -> Local HTTP/SOCKS5 proxy
+  -> Google-facing relay path
+  -> Apps Script Web App
+  -> Target website
 ```
 
-## Diagnostics and Policy Dry Run
+The project can also use optional exit nodes for destinations that reject Google egress traffic.
 
-This fork adds read-only troubleshooting commands:
+This is not a traditional full-device VPN. It is a local proxy and relay-based tunneling tool.
 
-- `python main.py doctor` checks local proxy readiness, Google front reachability, Apps Script relay/auth health, exit node health, and safety notes without starting the proxy.
-- `python main.py status` is an alias for the same diagnostics.
-- `python main.py doctor --check-host <host>` shows observe-only policy recommendations for a host without connecting to that target.
-- Runtime policy logging is currently observe-only; it does not change routing behavior.
+---
+
+## Diagnostics And Policy Dry Run
+
+### Doctor Command
+
+Run:
+
+```bash
+python main.py doctor
+```
+
+The doctor command checks the most common setup and connectivity problems:
+
+- `config.json` presence and required fields.
+- `auth_key` / Apps Script deployment configuration.
+- HTTP proxy bind readiness.
+- SOCKS5 proxy bind readiness.
+- Port conflicts.
+- Google front reachability.
+- Apps Script relay/auth health.
+- Exit node health when configured.
+- MITM CA state.
+- Safety notes.
+
+It does not start the proxy, install certificates, modify routes, or change runtime behavior.
 
 See:
 
 - [Doctor Command](docs/DOCTOR_COMMAND.md)
-- [Policy Routing](docs/POLICY_ROUTING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-This fork is also moving toward resilient diagnostics, policy routing, and future full-system tunnel support. Details are in [Resilient Tunnel PRD](docs/PRD_RESILIENT_TUNNEL.md) and [Target Architecture](docs/ARCHITECTURE_TARGET.md).
+### Policy Dry Run
 
-## Quick Menu 🧭
-
-Click the links below for guides on common topics.
-
-[Getting Started](docs/GETTING_STARTED.md) : How to set up the proxy and deploy the Google relay.
-
-[Exit Node](docs/exit-node/EXIT_NODE_DEPLOYMENT.md) : Connect to Cloudflare Workers or a VPS for destinations to fix ChatGPT, Turnstile, and similar sites blocking Google IPs.
-
-[LAN Sharing](docs/LAN_SHARING.md) : Share the proxy with other devices on your local network. (Android, iOS, other computers)
-
-[Configuration](docs/CONFIGURATION.md) : Reference for all config options, plus diagnostic commands.
-
-[Security](docs/SECURITY.md) : Important notes on safely using and sharing the proxy.
-
-[Troubleshooting](docs/TROUBLESHOOTING.md) : Common issues and how to resolve them.
-
-[Docker](docs/DOCKER.md) : Instructions for running the proxy in a Docker container.
-
-[Architecture](docs/ARCHITECTURE.md) : Overview of the system design and components.
-
-## Fast Start ⚡
-
-Before running the local proxy, deploy the Google relay once. You only need a Google account and about two minutes.
-
-## Deploy The Google Relay ☁️
-
-1. Open [Google Apps Script](https://script.google.com/) and sign in.
-2. Click **New project**.
-3. Delete the default editor content.
-4. Open [apps_script/Code.gs](apps_script/Code.gs), copy everything, and paste it into Apps Script.
-5. Find this line and replace it with your own long secret:
-
-    ```javascript
-    const AUTH_KEY = "your-secret-password-here";
-    ```
-
-6. Click **Deploy** -> **New deployment** -> **Web app**.
-7. Set **Execute as** to **Me**.
-8. Set **Who has access** to **Anyone**.
-9. Click **Deploy**, approve the permission screen, and copy the **Deployment ID**.
-
-Keep these two values ready for the setup wizard:
-
-- `Deployment ID` from Google Apps Script
-- `AUTH_KEY`, a long secret that must match `auth_key` in your local config
-
-If you want more detail, use [Getting Started](docs/GETTING_STARTED.md#2-deploy-the-google-relay).
-
-Download the project with either Git or ZIP, then run the one-click launcher.
-
-
-**Option A: ZIP**
-
-[Click to Download](https://github.com/masterking32/MasterHttpRelayVPN/archive/refs/heads/python_testing.zip)
-
-
-**Option B: Git**
+Run:
 
 ```bash
-git clone https://github.com/masterking32/MasterHttpRelayVPN.git
-cd MasterHttpRelayVPN
+python main.py doctor --check-host github.com
+python main.py doctor --check-host youtube.com --check-host example.ir
+python main.py status --check-host https://github.com
 ```
 
+This prints observe-only policy recommendations for each host.
 
-Then start the app:
+Example:
 
-**Windows**
+```text
+Policy Dry Run
+github.com:443   relay   apps_script  default_relay        matched=-  mitm_allowed=true   enforce=false
+example.ir:443   direct  direct       routing.domestic_direct  matched=.ir  mitm_allowed=false  enforce=false
+192.168.1.1:443  direct  direct       private_or_local_ip  matched=-  mitm_allowed=false  enforce=false
+```
+
+Policy dry-run does not connect to the target website. It only shows what the policy router would recommend.
+
+Runtime policy logging is currently observe-only. It does not change routing behavior.
+
+See:
+
+- [Policy Routing](docs/POLICY_ROUTING.md)
+
+---
+
+## Runtime Validation
+
+This fork was smoke-tested locally with a real browser profile through the proxy:
+
+- `https://example.com/` loaded successfully.
+- `https://www.youtube.com/` loaded successfully.
+- `ROUTE OBSERVE` logs appeared at runtime.
+- Apps Script relay activity was observed in proxy logs.
+
+Results can vary by network, Google Apps Script quota, deployment settings, certificate trust, browser behavior, and local configuration.
+
+This validation does not mean YouTube or any specific service is guaranteed to work for every user or network.
+
+---
+
+## Quick Start
+
+### 1. Clone This Fork
+
+```bash
+git clone https://github.com/MahdiNavaei/MasterHttpRelayVPN.git
+cd MasterHttpRelayVPN
+git checkout python_testing
+```
+
+### 2. Install Requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+Or use the launcher.
+
+Windows:
 
 ```cmd
 start.bat
 ```
 
-**Linux / macOS**
+Linux / macOS:
 
 ```bash
 chmod +x start.sh
 ./start.sh
 ```
 
-The launcher creates a virtual environment, installs dependencies, opens the setup wizard if `config.json` is missing, and starts the proxy.
+### 3. Deploy The Apps Script Relay
 
-After it starts, configure your browser to use:
+1. Open [Google Apps Script](https://script.google.com/).
+2. Create a new project.
+3. Copy the content of [apps_script/Code.gs](apps_script/Code.gs).
+4. Paste it into the Apps Script editor.
+5. Set a long random `AUTH_KEY`.
+6. Deploy as a Web App.
+7. Set **Execute as** to **Me**.
+8. Set **Who has access** to **Anyone**.
+9. Copy the Web App Deployment ID.
 
-| Field | Value |
-|-------|-------|
-| Proxy type | HTTP |
-| Address | `127.0.0.1` |
-| Port | `8085` |
-| SOCKS5 port | `1080` |
+### 4. Configure The Local Proxy
 
-After starting, CA will be installed automatically.
+Copy the example config:
 
-You can use telegram as : https://t.me/socks?server=127.0.0.1&port=1080 or if you are using PC client, you can add HTTP proxy with manually.
+```bash
+cp config.example.json config.json
+```
 
-## Common Next Steps 🛠️
+Edit:
 
-- If the browser shows certificate warnings, open [Troubleshooting](docs/TROUBLESHOOTING.md#certificate-errors).
-- If you see `unauthorized`, make sure `AUTH_KEY` in [apps_script/Code.gs](apps_script/Code.gs) exactly matches `auth_key` in `config.json`.
-- If ChatGPT, Turnstile, or similar sites block the Google exit IP, use [Exit Node Guide](docs/exit-node/EXIT_NODE_DEPLOYMENT.md).
+```json
+{
+  "script_id": "YOUR_APPS_SCRIPT_DEPLOYMENT_ID",
+  "auth_key": "THE_SAME_SECRET_AS_CODE_GS"
+}
+```
 
-## Support And Updates 📣
+The `auth_key` in `config.json` must match `AUTH_KEY` inside Apps Script.
 
-- Telegram channel: [https://t.me/MasterDnsVPN](https://t.me/MasterDnsVPN)
-- Telegram group: [https://t.me/MasterDnsVPNGroup](https://t.me/MasterDnsVPNGroup)
-- Ad blocker filter source: [PersianBlocker](https://github.com/MasterKia/PersianBlocker/)
+### 5. Run Diagnostics
 
-## Donate 🍩
+Before starting the proxy, run:
 
-If you find this project helpful, you can support it with a donation:
+```bash
+python main.py doctor
+```
 
-- **TON network:** `masterking32.ton`
-- **EVM-compatible networks (ETH and compatible chains):** `0x517f07305D6ED781A089322B6cD93d1461bF8652`
-- **TRC20 network (TRON):** `TLApdY8APWkFHHoxebxGY8JhMeChiETqFH`
+Optional host policy dry-run:
 
-## Safety 🔒
+```bash
+python main.py doctor --check-host github.com --check-host youtube.com --check-host 192.168.1.1
+```
 
-This project is provided for educational, testing, and research use. You are responsible for following applicable laws and service terms. Never share `config.json`, `auth_key`, `ca/`, or an exit-node URL together with a valid PSK. Read [Security Notes](docs/SECURITY.md) before sharing the proxy with other devices.
+### 6. Start The Proxy
 
-## Legal Disclaimer ⚠️
+```bash
+python main.py
+```
 
-- **Limitation of liability:** Developers and contributors are not responsible for direct, indirect, incidental, consequential, or other damages resulting from use of this project or inability to use it.
-- **User responsibility:** Running this project outside controlled environments may affect networks, accounts, proxies, certificates, or connected systems. You are solely responsible for installation, configuration, and usage.
-- **Legal compliance:** You are responsible for complying with all applicable local, national, and international laws and regulations before using this software.
-- **Google services compliance:** If you use Google Apps Script or other Google services, you are responsible for complying with Google's Terms of Service, acceptable use rules, quotas, and platform policies. Misuse can lead to suspension or termination of accounts or deployments.
+Default local ports:
+
+| Proxy | Address |
+|---|---|
+| HTTP | `127.0.0.1:8085` |
+| SOCKS5 | `127.0.0.1:1080` |
+
+For browsers, the HTTP proxy is usually the best option.
+
+---
+
+## Browser Setup
+
+Configure your browser to use:
+
+```text
+HTTP proxy: 127.0.0.1
+Port: 8085
+```
+
+For HTTPS browsing, this project uses local MITM TLS interception. The generated CA certificate must be trusted by your browser or operating system.
+
+The CA certificate is created under:
+
+```text
+ca/ca.crt
+```
+
+You can try automatic certificate installation:
+
+```bash
+python main.py --install-cert
+```
+
+To remove it:
+
+```bash
+python main.py --uninstall-cert
+```
+
+Never share the `ca/` folder or `ca/ca.key`.
+
+See:
+
+- [Getting Started](docs/GETTING_STARTED.md)
+- [Security Notes](docs/SECURITY.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+
+---
+
+## Configuration
+
+Most users only need:
+
+```json
+{
+  "script_id": "YOUR_DEPLOYMENT_ID",
+  "auth_key": "YOUR_SHARED_SECRET",
+  "http_port": 8085,
+  "socks5_port": 1080
+}
+```
+
+Advanced configuration supports:
+
+- Multiple Apps Script deployments with `script_ids`.
+- Google front domain/IP tuning.
+- HTTP/2 relay transport.
+- Batching and connection warmup.
+- Direct, bypass, and block host rules.
+- Optional exit node.
+- LAN sharing.
+- Adblock lists.
+- Observe-only routing policy configuration.
+
+See:
+
+- [Configuration Reference](docs/CONFIGURATION.md)
+- [LAN Sharing](docs/LAN_SHARING.md)
+- [Docker Guide](docs/DOCKER.md)
+
+---
+
+## Policy Routing Status
+
+Policy routing is currently in observe-only mode.
+
+That means:
+
+```text
+PolicyRouter calculates and logs recommendations.
+Existing proxy routing code still chooses the real traffic path.
+```
+
+This makes route behavior visible and testable before any enforcement is introduced.
+
+Current supported policy concepts include:
+
+- Direct domains.
+- Relay domains.
+- Block hosts.
+- Bypass hosts.
+- Sensitive domains.
+- Domestic direct suffixes.
+- Private/local IP bypass.
+- Exit-node host matching.
+
+Future versions may enforce selected low-risk rules after more runtime validation.
+
+See:
+
+- [Policy Routing](docs/POLICY_ROUTING.md)
+- [Target Architecture](docs/ARCHITECTURE_TARGET.md)
+
+---
+
+## Roadmap
+
+This fork is moving toward a more resilient, policy-based client-side tunneling framework.
+
+Planned direction:
+
+1. Better setup wizard and local Apps Script generation.
+2. More accurate diagnostics and offline/no-network checks.
+3. Policy routing validation against real-world configs.
+4. Low-risk policy enforcement for private/local and explicit block rules.
+5. Transport abstraction around Apps Script, direct, and exit-node paths.
+6. Experimental full-system mode through TUN/tun2socks.
+7. Future local DNS/policy integration.
+8. Future optional Worker/WebSocket or VPS transports.
+
+Non-goals for the current version:
+
+- No full-system VPN claim.
+- No TUN/tun2socks implementation yet.
+- No guarantee during complete internet shutdowns.
+- No guarantee that every website or video platform will work on every network.
+- No hidden policy enforcement.
+
+See:
+
+- [PRD: Resilient Tunnel Framework](docs/PRD_RESILIENT_TUNNEL.md)
+- [Implementation Plan](docs/IMPLEMENTATION_PLAN.md)
+- [Gap Analysis](docs/GAP_ANALYSIS.md)
+- [Engineering Recommendations](docs/ENGINEERING_RECOMMENDATIONS.md)
+
+---
+
+## Architecture
+
+Current simplified architecture:
+
+```text
+Browser/App
+  -> Local HTTP/SOCKS5 Proxy
+  -> Google front / Apps Script relay
+  -> Target website
+```
+
+Target direction:
+
+```text
+Browser/App or System Traffic
+  -> Local Proxy / Future TUN
+  -> Policy Router
+  -> Transport Selector
+  -> Apps Script / Direct / Exit Node / Future Transports
+  -> Target
+```
+
+See:
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Target Architecture](docs/ARCHITECTURE_TARGET.md)
+- [Project Audit](docs/PROJECT_AUDIT.md)
+
+---
+
+## Security Notes
+
+Protect these files and values:
+
+- `config.json`
+- `auth_key`
+- Apps Script Deployment ID when paired with a valid `auth_key`
+- `ca/ca.key`
+- The full `ca/` folder
+- Exit-node PSKs
+
+Do not paste real secrets into GitHub issues, screenshots, chats, or public logs.
+
+The `doctor` command redacts common secret fields to make troubleshooting safer, but you should still review output before sharing it publicly.
+
+See:
+
+- [Security Notes](docs/SECURITY.md)
+
+---
+
+## Troubleshooting
+
+Start with:
+
+```bash
+python main.py doctor
+```
+
+Then check common issues:
+
+- Wrong Apps Script Deployment ID.
+- Mismatched `auth_key`.
+- Apps Script not deployed as Web App.
+- Deployment access not set to `Anyone`.
+- Google front timeout.
+- Certificate trust errors.
+- Proxy port conflicts.
+- Apps Script quota exhaustion.
+- Outdated `Code.gs` deployment.
+
+See:
+
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+
+---
+
+## Upstream Credits
+
+This repository is a fork of:
+
+[masterking32/MasterHttpRelayVPN](https://github.com/masterking32/MasterHttpRelayVPN)
+
+Credit to the original author and contributors for the core relay/proxy implementation, including:
+
+- Google Apps Script relay.
+- Local HTTP/SOCKS5 proxy.
+- MITM TLS flow.
+- HTTP/1.1 and HTTP/2 relay transport.
+- Batching and warmup logic.
+- Google fronting support.
+- Optional exit-node support.
+- Launcher and setup scripts.
+
+This fork builds on that foundation and focuses on diagnostics, policy visibility, and future resilience improvements.
+
+---
 
 ## License
 
-MIT
+This project follows the license of the upstream repository. See [LICENSE](LICENSE) if present in this repository.
